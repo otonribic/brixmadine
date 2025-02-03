@@ -46,7 +46,7 @@ import bmtool
 import FreeSimpleGUI as sg
 
 # Some constants, defaults, etc. which are unnecessary in function arguments
-SWNAME = 'Brix Madine 1.0'
+SWNAME = 'Brix Madine 1.0.1'
 TILINGSTEPS = 0.02  # Step of a line when tracking tiles applicable for a line (in integer units)
 DEVMODE = False  # To be enabled during development
 PXPERDFU = 8  # How many pixels per DF unit, this is fixed
@@ -313,7 +313,11 @@ def _gettiles(p1, p2):
     xs = p2[0] - p1[0]
     ys = p2[1] - p1[1]
     length = ((xs**2) + (ys**2))**0.5
+    if length < 0.01:
+        # Is the length zero? If yes, just consider that single column
+        return {(int(p1[0]), int(p1[1])), }
     divisor = length / TILINGSTEPS
+    if divisor < 1: divisor = 1  # Avoid microsteps
     stepx = xs / divisor
     stepy = ys / divisor
     # Create a list of tracked points
