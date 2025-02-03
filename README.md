@@ -5,3 +5,5 @@ A simple app to convert Star Wars: Dark Forces levels (.LEV files along with the
 
 Default scales are 2.0/1.8 to make the levels in the minifig scale, but for many levels that will simply be too large, i.e. the resulting LEGO LDR file will be too large to be loaded by standard CAD programs. (It's not difficult to get >200K parts in such cases.)
 Scales like 4/3.2 or eve 6/5.4 are much more sane in such cases.
+
+Pure Python. Uses dftools by N.Jankowski, https://github.com/njankowski/dftools
