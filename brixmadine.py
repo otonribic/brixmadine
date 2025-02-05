@@ -28,15 +28,22 @@ General approach:
 
 ====
 
-EXAMPLES
-
-Obtaining a PIL.Image from a BM with a given palette:
-img = bmtool.convbm('resource\\if3.bm', 'resource\\secbase.pal')
+NOTES:
+* Sector flags: 1=No ceiling (sky); 128=No floor (pit); 1024=No walls (horizon)
+* Obtaining a PIL.Image from a BM with a given palette:
+  img = bmtool.convbm('resource\\if3.bm', 'resource\\secbase.pal')
 
 ====
 
 * by fish (oton.ribic@gmail.com), 2025
 * using BM library from dftools by Nicholas Jankowski
+
+====
+
+To do v1.1:
+X consider the "no wall" flag of sectors
+X consider the "no floor" flag of sectors
+X handle areas where the specified BM is not available
 
 '''
 
@@ -45,13 +52,15 @@ import os
 import bmtool
 import FreeSimpleGUI as sg
 
-# Some constants, defaults, etc. which are unnecessary in function arguments
-SWNAME = 'Brix Madine 1.0.1'
-TILINGSTEPS = 0.02  # Step of a line when tracking tiles applicable for a line (in integer units)
 DEVMODE = False  # To be enabled during development
+
+# Some constants, defaults, etc. which are unnecessary in function arguments
+SWNAME = 'Brix Madine 1.1'
+TILINGSTEPS = 0.02  # Step of a line when tracking tiles applicable for a line (in integer units)
 PXPERDFU = 8  # How many pixels per DF unit, this is fixed
 LEGOPLATEHEIGHT = 0.4  # How many studs is a LEGO plate high
 REDUCTION = 0.8  # Multiplier of iterator steps to be fully sure that there will be no misjumps due to floats
+FALLBACKBM = 'DEFAULT.BM'  # Default BM to be used if the specified one was not found
 ABOUT = '''Use this program to convert .LEV Dark Forces files (along with their resources) to LEGO models that can be opened in programs such as BrickLink Studio, MLCAD, LDraw Viewer, etc. With the default scaling of 2 Dark Forces units per stud horizontally and 1.8 vertically, the resulting levels will be approximately in the LEGO minifig scale. Make sure that all BM's (from Vanilla Dark Forces or custom ones) are available in the resources directory you specify, or in the folder where the .LEV file is (which is searched secondarily if a BM is not found in the resources folder).
 
 Keep in mind that the conversion itself (i.e. generating a LEGO file from .LEV) may take several minutes, and loading it in the chosen app comparably long.
@@ -147,8 +156,8 @@ def _levparse(
     # Set up collectors
     textures = []  # List of .BM's
     sectors = []  # Containing sectors, each being their own list
-    # Local aggregator of sectors: walls, floor tx, ox,y, ceiling tx, ox,y, flooralt, ceilalt, opensky
-    locsector = [[], None, None, None, None, None, None, None, None, None]  # Reset it
+    # Local aggregator of sectors: walls, floor tx, ox,y, ceiling tx, ox,y, flooralt, ceilalt, opensky, openflr, nowall
+    locsector = [[], None, None, None, None, None, None, None, None, None, None, None]  # Reset it
 
     # Process line-by-line
     for line in inf:
@@ -164,7 +173,7 @@ def _levparse(
             # Firstly append the previous one if valid
             if locsector[0]:
                 sectors.append(locsector)
-            locsector = [[], None, None, None, None, None, None, None, None, None]  # Reset it
+            locsector = [[], None, None, None, None, None, None, None, None, None, None, None]  # Reset it
             wall = [None, None, None, None, None, None, None, None, None, None, None, None]
         # Floor or ceiling alt?
         if line.startswith('FLOOR ALTITUDE'):
@@ -184,9 +193,15 @@ def _levparse(
             locsector[4] = textures[int(ln[0])]
             locsector[5] = float(ln[1])
             locsector[6] = float(ln[2])
-        # Open sky?
+        # Various flags
         if line.startswith('FLAGS'):
-            locsector[9] = bool(int(line[5:].strip(' ').partition(' ')[0]) % 2)
+            flagvalue = int(line[5:].strip(' ').partition(' ')[0])
+            # No sky?
+            locsector[9] = bool(flagvalue % 2)
+            # No floor?
+            locsector[10] = bool(flagvalue % 256 // 128)
+            # No walls?
+            locsector[11] = bool(flagvalue % 2048 // 1024)
         # Vertices list?
         if line.startswith('VERTICES'):
             locvertex = []  # Clear vertex list
@@ -251,7 +266,7 @@ def _levrefine(lev):
     [sector, sector, sector, ...]
     sector:
     [walls, floor texture, floorofx, floorofy, ceiling texture, ceilofx,
-     ceilofy, flr alt, ceil alt, opensky?, area, originalwalls]
+     ceilofy, flr alt, ceil alt, opensky?, openflr?, nowalls?, area, originalwalls]
     walls:
     [wall, wall, wall, ...]
     wall:
@@ -562,6 +577,9 @@ def dfmap(
     # First loop cycle, with sector walls
     for ctr, sector in enumerate(lev):
         sg.one_line_progress_meter('Calculating wall geometry...', ctr, len(lev), no_button=True, orientation='h')
+        # Firstly check whether walls are even needed
+        if sector[11]: continue  # Not because noWalls flag is True
+        # Proceed to iterate over sector walls
         for wall in sector[0]:
             # Process that wall
             # Split to local parameters
@@ -576,13 +594,18 @@ def dfmap(
             # Knowing its stud geometry, find out the relevant tiles
             tiles = _gettiles(a, b)
             # Get the texture of this wall, needed during later loops
-            try:
+            if os.path.isfile(texture):
                 teximg = bmtool.convbm(texture, palfile)
-            except:
+            else:
                 # Perhaps in the level folder?
                 alternate = texture.rpartition('/')[2]
                 alternate = levfolder + alternate
-                teximg = bmtool.convbm(alternate, palfile)
+                if os.path.isfile(alternate):
+                    teximg = bmtool.convbm(alternate, palfile)
+                else:
+                    # Not there either, so fallback
+                    teximg = bmtool.convbm(FALLBACKBM, palfile)
+                    print('Warning: File', texture, 'not found, using fallback BM')
             # Process each tile
             for tilex, tiley in tiles:
                 # Get the tile's distance from the wall start (necessary for texturing)
@@ -644,7 +667,8 @@ def dfmap(
     for ctr, sector in enumerate(lev):
         sg.one_line_progress_meter('Calculating floors & ceilings...', ctr, len(lev), no_button=True, orientation='h')
         # Split to innerlocal variables
-        walls, flrtx, flrox, flroy, ceiltx, ceilox, ceiloy, flralt, ceilalt, opensky, area, origwalls = sector
+        walls, flrtx, flrox, flroy, ceiltx, ceilox, ceiloy, flralt, ceilalt, \
+            opensky, openflr, nowalls, area, origwalls = sector
         # Convert DFU in walls to LEGO studs
         for id in range(len(origwalls)):
             s, e = origwalls[id]
@@ -664,27 +688,33 @@ def dfmap(
             # Floors and ceilings have to be dealt with separately because of different textures, offsets, etc.
 
             # FlOORS
-            # Get offsets
-            fdfx = dfx + flrox
-            fdfy = dfy + flroy
-            # With offset applied, get the pixel positions
-            fpxx = fdfx * PXPERDFU
-            fpxy = fdfy * PXPERDFU
-            try:
-                teximg = bmtool.convbm(flrtx, palfile)
-            except:
-                # Perhaps in the level folder?
-                alternate = flrtx.rpartition('/')[2]
-                alternate = levfolder + alternate
-                teximg = bmtool.convbm(alternate, palfile)
-            fpxx = int(fpxx % teximg.size[0])
-            fpxy = int(fpxy % teximg.size[1])
-            # Knowing pixel position, check the color in the image
-            targcol = teximg.getpixel((fpxx, fpxy))[0:3]  # To make sure it is RGB, not RGBA
-            # Get nearest LEGO color
-            legocol = _matchcolor(targcol, directrgb)
-            # Add the tile to the corresponding layer
-            legoplates.append((tilex, tiley, lflr, legocol))
+            if not openflr:
+                # Get offsets
+                fdfx = dfx + flrox
+                fdfy = dfy + flroy
+                # With offset applied, get the pixel positions
+                fpxx = fdfx * PXPERDFU
+                fpxy = fdfy * PXPERDFU
+                if os.path.isfile(flrtx):
+                    teximg = bmtool.convbm(flrtx, palfile)
+                else:
+                    # Perhaps in the level folder?
+                    alternate = flrtx.rpartition('/')[2]
+                    alternate = levfolder + alternate
+                    if os.path.isfile(alternate):
+                        teximg = bmtool.convbm(alternate, palfile)
+                    else:
+                        # Not there either, so fallback
+                        teximg = bmtool.convbm(FALLBACKBM, palfile)
+                        print('Warning: File', flrtx, 'not found, using fallback BM')
+                fpxx = int(fpxx % teximg.size[0])
+                fpxy = int(fpxy % teximg.size[1])
+                # Knowing pixel position, check the color in the image
+                targcol = teximg.getpixel((fpxx, fpxy))[0:3]  # To make sure it is RGB, not RGBA
+                # Get nearest LEGO color
+                legocol = _matchcolor(targcol, directrgb)
+                # Add the tile to the corresponding layer
+                legoplates.append((tilex, tiley, lflr, legocol))
 
             # CEILINGS (if requested and applicable)
             if generateceilings and not opensky:
@@ -694,13 +724,18 @@ def dfmap(
                 # Get pixel positions now that offsets have been applied
                 cpxx = cdfx * PXPERDFU
                 cpxy = cdfy * PXPERDFU
-                try:
+                if os.path.isfile(ceiltx):
                     teximg = bmtool.convbm(ceiltx, palfile)
-                except:
+                else:
                     # Perhaps in the level folder?
                     alternate = ceiltx.rpartition('/')[2]
                     alternate = levfolder + alternate
-                    teximg = bmtool.convbm(alternate, palfile)
+                    if os.path.isfile(alternate):
+                        teximg = bmtool.convbm(alternate, palfile)
+                    else:
+                        # Not there either, so fallback
+                        teximg = bmtool.convbm(FALLBACKBM, palfile)
+                        print('Warning: File', ceiltx, 'not found, using fallback BM')
                 cpxx = int(cpxx % teximg.size[0])
                 cpxy = int(cpxy % teximg.size[1])
                 # Knowing pixel position, check the color in the image
@@ -730,6 +765,11 @@ def dfmap(
     outf.write(outcontent)
     outf.close()
 
+    # Notify
+    numparts = len(partset)
+    quickmsg = 'Done, exported file ' + outfile + ' with ' + str(numparts) + ' parts'
+    sg.popup_quick_message(quickmsg, auto_close_duration=4)
+
 
 ### Main run ###
 ################
@@ -738,20 +778,25 @@ if __name__ == '__main__':
 
     # Debug/dev mode selftest
     if DEVMODE:
-        dfmap(mapfile=r'C:/Users/otonr/AppVault/DOS/GAME/DF/wdfuse/ats2/secbase.LEV',
-              resfolder=r'C:/Users/otonr/AppVault/DOS/GAME\DF/vanilla',
+        mf = r'C:/Users/otonr/AppVault/DOS/GAME/DF/vanilla/gromas.LEV'
+        # mf = r'C:/Users/otonr/AppVault/DOS/GAME/DF/wdfuse/ats2/secbase.LEV'
+        # mf = r'C:/Users/otonr/AppVault/DOS/GAME/DF/wdfuse310/nraid133/secbase.lev'
+        # mf = r'C:/Users/otonr/AppVault/DOS/GAME/DF/wdfuse310/capture/secbase.lev'
+        # mf = r'C:/Users/otonr/AppVault/DOS/GAME/DF/wdfuse310/1room7/secbase.lev'
+        dfmap(mapfile=mf,
+              resfolder=r'C:/Users/otonr/AppVault/DOS/GAME/DF/vanilla',
               outfile='c:/users/otonr/desktop/ats2.ldr',
               generateceilings=False,
               directrgb=True,
-              xyscale=4,  # 2 default
-              zscale=3.6,  # 1.8 default
+              xyscale=1,  # 2 default
+              zscale=0.8,  # 1.8 default
               )
         sys.exit(0)  # End selftest
 
     # No development mode; standard run
     print(SWNAME)
     # Initialize visual
-
+    sg.theme('DarkGrey11')
     layout = [[sg.Text('Input .LEV file:'), sg.Input(key='lev'),
                sg.FileBrowse('Browse', file_types=(('Dark Forces Levels', '*.LEV'),))],
               [sg.Text('Palette .PAL file (auto-detected if left blank):'), sg.Input(key='pal'),
@@ -759,16 +804,18 @@ if __name__ == '__main__':
               [sg.Text('Output .LDR file (auto-generated if left blank):'), sg.Input('brixmadine.ldr', key='ldr')],
               [sg.Text('Additional resources (e.g. BM files) directory:'),
                sg.Input(key='res'), sg.FolderBrowse('Browse')],
+              [sg.Text('')],
               [sg.Text('X and Y scale (how many DF units per Lego stud):'),
                sg.Input('2.0', key='xyscale')],
               [sg.Text('Height scale (how many DF units per Lego stud)'),
                sg.Input('1.8', key='zscale')],
+              [sg.Text('')],
               [sg.Checkbox('Generate ceilings', key='ceilings'),
                sg.Checkbox('Use exact RGB part colors', key='directcol', default=1)],
               [sg.Button('Generate'), sg.Button('About'), sg.Button('Quit'),
                sg.Text('Use the "/" path separators (forward slash rather than backslash)'),],
               ]
-    window = sg.Window(SWNAME, layout)
+    window = sg.Window(SWNAME, layout, icon='brixmadine.ico')
 
     # Main loop
     while True:
